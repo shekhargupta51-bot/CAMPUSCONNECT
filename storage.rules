@@ -1,0 +1,31 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isValidFileSize() {
+      // 25 MB limit
+      return request.resource.size <= 25 * 1024 * 1024;
+    }
+
+    // Default deny
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+
+    // Notes and learning materials: professors & admins can upload; authenticated users can download
+    match /resources/{subjectId}/{fileName} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && isValidFileSize();
+    }
+
+    // Student assignments and project submissions: student can upload to their own folder
+    match /submissions/{assignmentId}/{studentId}/{fileName} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && (request.auth.uid == studentId) && isValidFileSize();
+    }
+  }
+}

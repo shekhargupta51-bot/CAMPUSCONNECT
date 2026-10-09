@@ -1,0 +1,172 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // --- HELPER FUNCTIONS ---
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function getUserRole() {
+      return isAuthenticated() ? getUserData().role : null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && getUserRole() == 'admin';
+    }
+
+    function isProfessor() {
+      return isAuthenticated() && (getUserRole() == 'professor' || getUserRole() == 'admin');
+    }
+
+    function isStudent() {
+      return isAuthenticated() && getUserRole() == 'student';
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAssignedProfessor(subjectId) {
+      let subject = get(/databases/$(database)/documents/subjects/$(subjectId)).data;
+      return isAuthenticated() && (isAdmin() || (isProfessor() && subject.professorId == request.auth.uid));
+    }
+
+    function isEnrolledStudent(subjectId) {
+      let subject = get(/databases/$(database)/documents/subjects/$(subjectId)).data;
+      return isAuthenticated() && (isAdmin() || subject.enrolledStudentIds.hasAny([request.auth.uid]));
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- USERS COLLECTION ---
+    match /users/{userId} {
+      // Any authenticated user can read public directory profiles (name, role, department, office)
+      allow read: if isAuthenticated();
+      
+      // Only administrators can create or provision accounts with custom roles
+      // Students can sign up with their own UID but cannot elevate role beyond 'student'
+      allow create: if isAuthenticated() && (
+        isAdmin() || 
+        (request.auth.uid == userId && request.resource.data.role == 'student')
+      );
+
+      // Users can update their own contact info, but CANNOT change their role or privileges
+      allow update: if isAuthenticated() && (
+        isAdmin() ||
+        (request.auth.uid == userId && request.resource.data.role == resource.data.role)
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // --- SUBJECTS COLLECTION ---
+    match /subjects/{subjectId} {
+      // Authenticated users can view subjects list and course info
+      allow read: if isAuthenticated();
+
+      // Only administrators can create or delete courses
+      allow create, delete: if isAdmin();
+
+      // Administrators and assigned professors can update subject syllabus/description/schedule
+      allow update: if isAuthenticated() && (isAdmin() || isAssignedProfessor(subjectId));
+    }
+
+    // --- NOTES & RESOURCES COLLECTION ---
+    match /resources/{resourceId} {
+      // Students enrolled, assigned professors, and admins can read learning resources
+      allow read: if isAuthenticated();
+
+      // Only the assigned course professor or admin can create, update, or delete study materials
+      allow create, update, delete: if isAuthenticated() && (
+        isAdmin() || 
+        (isProfessor() && isAssignedProfessor(request.resource.data.subjectId)) ||
+        (isProfessor() && resource != null && isAssignedProfessor(resource.data.subjectId))
+      );
+    }
+
+    // --- ASSIGNMENTS COLLECTION ---
+    match /assignments/{assignmentId} {
+      // Enrolled students and professors can view assignments
+      allow read: if isAuthenticated();
+
+      // Only assigned professors or admins can publish, edit, or delete assignments
+      allow create, update, delete: if isAuthenticated() && (
+        isAdmin() ||
+        (isProfessor() && isAssignedProfessor(request.resource.data.subjectId)) ||
+        (isProfessor() && resource != null && isAssignedProfessor(resource.data.subjectId))
+      );
+    }
+
+    // --- SUBMISSIONS COLLECTION ---
+    match /submissions/{submissionId} {
+      // Student can view their own submission; Assigned professor and Admin can view all submissions for grading
+      allow read: if isAuthenticated() && (
+        isAdmin() ||
+        resource.data.studentId == request.auth.uid ||
+        isProfessor()
+      );
+
+      // Student can submit their own work; cannot submit as another student
+      allow create: if isAuthenticated() && (
+        isAdmin() ||
+        (isStudent() && request.resource.data.studentId == request.auth.uid)
+      );
+
+      // Student can update their submission before deadline; Professor can update to grade/add feedback
+      allow update: if isAuthenticated() && (
+        isAdmin() ||
+        (isStudent() && resource.data.studentId == request.auth.uid && request.resource.data.marks == resource.data.marks) ||
+        isProfessor()
+      );
+
+      allow delete: if isAdmin() || (isStudent() && resource.data.studentId == request.auth.uid);
+    }
+
+    // --- ATTENDANCE SESSIONS COLLECTION ---
+    match /attendance_sessions/{sessionId} {
+      // Enrolled students and staff can view attendance records
+      allow read: if isAuthenticated();
+
+      // Only assigned professors or admins can record and update attendance roll calls
+      allow create, update, delete: if isAuthenticated() && (
+        isAdmin() ||
+        (isProfessor() && isAssignedProfessor(request.resource.data.subjectId)) ||
+        (isProfessor() && resource != null && isAssignedProfessor(resource.data.subjectId))
+      );
+    }
+
+    // --- MARKS & EVALUATIONS COLLECTION ---
+    match /marks/{markId} {
+      // Student can view ONLY their own marks; Professor and Admin can view course gradebook
+      allow read: if isAuthenticated() && (
+        isAdmin() ||
+        resource.data.studentId == request.auth.uid ||
+        isProfessor()
+      );
+
+      // Only assigned professor or admin can publish or modify grade marks and written feedback
+      // Students can NEVER write or modify mark records
+      allow create, update, delete: if isAuthenticated() && (
+        isAdmin() ||
+        (isProfessor() && isAssignedProfessor(request.resource.data.subjectId)) ||
+        (isProfessor() && resource != null && isAssignedProfessor(resource.data.subjectId))
+      );
+    }
+
+    // --- ANNOUNCEMENTS COLLECTION ---
+    match /announcements/{announcementId} {
+      allow read: if isAuthenticated();
+
+      // Professors can post subject notices; Admins can post school-wide notices
+      allow create, update, delete: if isAuthenticated() && (isAdmin() || isProfessor());
+    }
+  }
+}
